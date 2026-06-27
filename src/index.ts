@@ -84,7 +84,6 @@ async function handleUpdate(msg: TelegramBot.Message) {
   } else if (command === "preview") {
     const channel = await getChannel(chatId);
     const level = channel?.level || "C2";
-    await send(chatId, Message.generating);
     try {
       const type: ContentType = Math.random() < 0.5 ? getMorningType() : getEveningType();
       const index = await peekIndex(level, type);
