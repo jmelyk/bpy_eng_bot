@@ -8,19 +8,16 @@ interface MemChannel {
   level: string;
   active: boolean;
 }
-interface MemLogEntry {
-  level: string;
-  contentType: string;
-  topic: string;
-}
 
 const memChannels = new Map<number, MemChannel>();
-const memLog: MemLogEntry[] = [];
+const memProgress = new Map<string, number>();
 
 const useMemory = !process.env.DATABASE_URL;
 
 if (useMemory) {
-  console.warn("DATABASE_URL not set — using in-memory storage (data will be lost on restart)");
+  console.warn(
+    "DATABASE_URL not set — using in-memory storage (data will be lost on restart)"
+  );
 }
 
 // --- PostgreSQL pool (only created when DATABASE_URL is present) ---
@@ -60,17 +57,12 @@ export async function initDb(): Promise<void> {
     )
   `);
   await query(`
-    CREATE TABLE IF NOT EXISTS content_log (
-      id SERIAL PRIMARY KEY,
+    CREATE TABLE IF NOT EXISTS content_progress (
       level VARCHAR(2) NOT NULL,
       content_type TEXT NOT NULL,
-      topic TEXT NOT NULL,
-      posted_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      next_index INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY (level, content_type)
     )
-  `);
-  await query(`
-    CREATE INDEX IF NOT EXISTS content_log_lookup_idx
-    ON content_log (level, content_type, posted_at DESC)
   `);
 }
 
@@ -80,7 +72,12 @@ export async function subscribeChannel(
 ): Promise<void> {
   if (useMemory) {
     const existing = memChannels.get(id);
-    memChannels.set(id, { id, title, level: existing?.level ?? "C2", active: true });
+    memChannels.set(id, {
+      id,
+      title,
+      level: existing?.level ?? "C2",
+      active: true,
+    });
     return;
   }
   await query(
@@ -131,38 +128,37 @@ export async function getActiveChannels(): Promise<Channel[]> {
   return result.rows;
 }
 
-export async function logContent(
+// Returns the current index for peeking (used by /preview — does not advance)
+export async function peekIndex(
   level: string,
-  contentType: string,
-  topic: string
-): Promise<void> {
-  if (useMemory) {
-    memLog.push({ level, contentType, topic });
-    return;
-  }
-  await query(
-    `INSERT INTO content_log (level, content_type, topic) VALUES ($1, $2, $3)`,
-    [level, contentType, topic]
+  contentType: string
+): Promise<number> {
+  if (useMemory) return memProgress.get(`${level}:${contentType}`) ?? 0;
+  const result = await query(
+    `SELECT next_index FROM content_progress WHERE level = $1 AND content_type = $2`,
+    [level, contentType]
   );
+  return (result.rows[0]?.next_index as number) ?? 0;
 }
 
-export async function getRecentTopics(
+// Returns the current index and atomically increments it for the next send
+export async function getAndIncrementIndex(
   level: string,
-  contentType: string,
-  limit = 30
-): Promise<string[]> {
+  contentType: string
+): Promise<number> {
+  const key = `${level}:${contentType}`;
   if (useMemory) {
-    return memLog
-      .filter((e) => e.level === level && e.contentType === contentType)
-      .slice(-limit)
-      .reverse()
-      .map((e) => e.topic);
+    const current = memProgress.get(key) ?? 0;
+    memProgress.set(key, current + 1);
+    return current;
   }
   const result = await query(
-    `SELECT topic FROM content_log
-     WHERE level = $1 AND content_type = $2
-     ORDER BY posted_at DESC LIMIT $3`,
-    [level, contentType, limit]
+    `INSERT INTO content_progress (level, content_type, next_index)
+     VALUES ($1, $2, 1)
+     ON CONFLICT (level, content_type) DO UPDATE
+       SET next_index = content_progress.next_index + 1
+     RETURNING content_progress.next_index - 1 AS used_index`,
+    [level, contentType]
   );
-  return result.rows.map((r: { topic: string }) => r.topic);
+  return result.rows[0].used_index as number;
 }

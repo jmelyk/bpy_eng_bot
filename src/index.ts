@@ -5,17 +5,15 @@ import {
   initDb,
   subscribeChannel,
   unsubscribeChannel,
-  setChannelLevel,
   getChannel,
   getActiveChannels,
-  logContent,
-  getRecentTopics,
+  peekIndex,
+  getAndIncrementIndex,
 } from "./db";
 import {
   generateContent,
   getMorningType,
   getEveningType,
-  VALID_LEVELS,
   ContentType,
 } from "./content";
 import { Message } from "./messages";
@@ -83,29 +81,14 @@ async function handleUpdate(msg: TelegramBot.Message) {
     }
     await unsubscribeChannel(chatId);
     await send(chatId, Message.unsubscribed);
-  } else if (command === "level") {
-    const levelArg = text.trim().split(/\s+/)[1]?.toUpperCase();
-    if (!levelArg || !VALID_LEVELS.includes(levelArg)) {
-      await send(chatId, Message.invalidLevel);
-      return;
-    }
-    const existing = await getChannel(chatId);
-    if (!existing) {
-      await send(chatId, Message.notSubscribed);
-      return;
-    }
-    await setChannelLevel(chatId, levelArg);
-    await send(chatId, Message.levelUpdated(levelArg));
   } else if (command === "preview") {
     const channel = await getChannel(chatId);
     const level = channel?.level || "C2";
     await send(chatId, Message.generating);
     try {
-      const day = new Date().getDay();
-      const types: ContentType[] = [getMorningType(day), getEveningType(day)];
-      const type = types[Math.floor(Math.random() * types.length)];
-      const recentTopics = await getRecentTopics(level, type);
-      const { content } = await generateContent(type, level, recentTopics);
+      const type: ContentType = Math.random() < 0.5 ? getMorningType() : getEveningType();
+      const index = await peekIndex(level, type);
+      const { content } = generateContent(type, level, index);
       await send(chatId, content);
     } catch (err) {
       console.error("Preview generation error:", err);
@@ -113,11 +96,7 @@ async function handleUpdate(msg: TelegramBot.Message) {
     }
   } else if (command === "status") {
     const channel = await getChannel(chatId);
-    if (!channel) {
-      await send(chatId, Message.status(false, "C2"));
-    } else {
-      await send(chatId, Message.status(channel.active, channel.level));
-    }
+    await send(chatId, Message.status(channel?.active ?? false));
   } else if (command === "help") {
     await send(chatId, Message.help);
   }
@@ -150,10 +129,9 @@ async function sendDailyContent(session: "morning" | "evening") {
     return;
   }
 
-  const day = new Date().getDay();
-  const getType = session === "morning" ? getMorningType : getEveningType;
+  const type = session === "morning" ? getMorningType() : getEveningType();
 
-  // Group by level to avoid duplicate Claude API calls
+  // Group by level — one post generated per unique level
   const byLevel = new Map<string, number[]>();
   for (const ch of channels) {
     const ids = byLevel.get(ch.level) || [];
@@ -162,20 +140,18 @@ async function sendDailyContent(session: "morning" | "evening") {
   }
 
   for (const [level, ids] of byLevel) {
-    const type = getType(day);
     console.log(
-      `Generating ${session} ${type} content for level ${level} (${ids.length} channel(s))...`
+      `Sending ${session} ${type} [${level}] to ${ids.length} channel(s)...`
     );
     try {
-      const recentTopics = await getRecentTopics(level, type);
-      const { content, topic } = await generateContent(type, level, recentTopics);
+      const index = await getAndIncrementIndex(level, type);
+      const { content, topic } = generateContent(type, level, index);
       for (const chatId of ids) {
         await send(chatId, content);
       }
-      await logContent(level, type, topic);
-      console.log(`✅ Sent ${session} ${type} [${level}] topic="${topic}" to ${ids.length} channel(s)`);
+      console.log(`✅ ${session} ${type} [${level}] #${index} "${topic}" → ${ids.length} channel(s)`);
     } catch (err) {
-      console.error(`Error generating ${type} for level ${level}:`, err);
+      console.error(`Error sending ${type} for level ${level}:`, err);
     }
   }
 }
@@ -187,7 +163,6 @@ async function main() {
   await bot.setMyCommands([
     { command: "start", description: "Subscribe to daily posts" },
     { command: "stop", description: "Unsubscribe from daily posts" },
-    { command: "level", description: "Set English level (A1 A2 B1 B2 C1 C2)" },
     { command: "preview", description: "Get a sample post right now" },
     { command: "status", description: "Show subscription status" },
     { command: "help", description: "Show all commands" },

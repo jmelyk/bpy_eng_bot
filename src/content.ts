@@ -14,26 +14,25 @@ export interface GeneratedContent {
   topic: string;
 }
 
-function getDayOfYear(): number {
-  const now = new Date();
-  const start = new Date(now.getFullYear(), 0, 0);
-  const diff = now.getTime() - start.getTime();
-  return Math.floor(diff / 86_400_000);
-}
-
-function pickByDay<T extends { level: string }>(
-  items: T[],
-  level: string,
-  offset = 0
-): T {
+function eligibleWords(level: string) {
   const rank = levelRank[level] ?? 6;
-  const eligible = items.filter((item) => (levelRank[item.level] ?? 6) <= rank);
-  const index = (getDayOfYear() + offset) % eligible.length;
-  return eligible[index];
+  return words.filter((w) => (levelRank[w.level] ?? 6) <= rank);
 }
 
-function formatWord(level: string): GeneratedContent {
-  const entry = pickByDay(words, level, 0);
+function eligiblePhrases(level: string) {
+  const rank = levelRank[level] ?? 6;
+  return phrases.filter((p) => (levelRank[p.level] ?? 6) <= rank);
+}
+
+export function listLength(type: ContentType, level: string): number {
+  return type === "word"
+    ? eligibleWords(level).length
+    : eligiblePhrases(level).length;
+}
+
+function formatWord(level: string, index: number): GeneratedContent {
+  const list = eligibleWords(level);
+  const entry = list[index % list.length];
   const syn = entry.synonym ? `\n<b>Synonym:</b> ${entry.synonym}` : "";
   const ant = entry.antonym ? `　<b>Antonym:</b> ${entry.antonym}` : "";
   const content =
@@ -47,9 +46,9 @@ function formatWord(level: string): GeneratedContent {
   return { content, topic: entry.word };
 }
 
-function formatPhrase(level: string): GeneratedContent {
-  // Offset by 180 so word and phrase pick different items from their respective lists
-  const entry = pickByDay(phrases, level, 180);
+function formatPhrase(level: string, index: number): GeneratedContent {
+  const list = eligiblePhrases(level);
+  const entry = list[index % list.length];
   const content =
     `💬 <b>Phrase of the Day</b>\n\n` +
     `<b>${entry.phrase}</b>\n\n` +
@@ -64,15 +63,17 @@ function formatPhrase(level: string): GeneratedContent {
 export function generateContent(
   type: ContentType,
   level: string = "C2",
-  _recentTopics: string[] = []
+  index: number = 0
 ): GeneratedContent {
-  return type === "word" ? formatWord(level) : formatPhrase(level);
+  return type === "word"
+    ? formatWord(level, index)
+    : formatPhrase(level, index);
 }
 
-export function getMorningType(_dayOfWeek: number): ContentType {
+export function getMorningType(): ContentType {
   return "word";
 }
 
-export function getEveningType(_dayOfWeek: number): ContentType {
+export function getEveningType(): ContentType {
   return "phrase";
 }
